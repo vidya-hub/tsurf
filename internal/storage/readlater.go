@@ -1,11 +1,8 @@
 package storage
 
 import (
-	"encoding/json"
+	"database/sql"
 	"fmt"
-	"os"
-	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 
@@ -14,129 +11,100 @@ import (
 
 // ReadLaterItem represents a page saved for later reading.
 type ReadLaterItem struct {
-	URL       string    `json:"url"`
-	Title     string    `json:"title"`
-	CreatedAt time.Time `json:"created_at"`
-	Read      bool      `json:"read"`
+	ID        int64
+	URL       string
+	Title     string
+	CreatedAt time.Time
+	Read      bool
 }
 
-// ReadLaterStore manages the read-later queue.
+// ReadLaterStore manages the read-later queue in SQLite.
 type ReadLaterStore struct {
-	items []ReadLaterItem
-	path  string
+	db *sql.DB
 }
 
-// NewReadLaterStore creates a read-later store at the given data directory.
-func NewReadLaterStore(dataDir string) (*ReadLaterStore, error) {
-	if err := os.MkdirAll(dataDir, 0o755); err != nil {
-		return nil, fmt.Errorf("creating data dir: %w", err)
-	}
-
-	path := filepath.Join(dataDir, "readlater.json")
-	rl := &ReadLaterStore{path: path}
-
-	if err := rl.load(); err != nil && !os.IsNotExist(err) {
-		return nil, fmt.Errorf("loading read later: %w", err)
-	}
-
-	return rl, nil
+// NewReadLaterStore creates a read-later store using the given database.
+func NewReadLaterStore(db *DB) *ReadLaterStore {
+	return &ReadLaterStore{db: db.Conn()}
 }
 
 // Add adds an item to the read-later queue. Returns false if already queued.
 func (rl *ReadLaterStore) Add(url, title string) bool {
-	for _, item := range rl.items {
-		if item.URL == url {
-			return false
-		}
-	}
-
-	rl.items = append(rl.items, ReadLaterItem{
-		URL:       url,
-		Title:     title,
-		CreatedAt: time.Now(),
-	})
-
-	rl.save()
-	return true
+	_, err := rl.db.Exec(
+		`INSERT OR IGNORE INTO read_later (url, title) VALUES (?, ?)`,
+		url, title,
+	)
+	return err == nil
 }
 
 // Remove removes an item by URL.
 func (rl *ReadLaterStore) Remove(url string) bool {
-	for i, item := range rl.items {
-		if item.URL == url {
-			rl.items = append(rl.items[:i], rl.items[i+1:]...)
-			rl.save()
-			return true
-		}
+	res, err := rl.db.Exec(`DELETE FROM read_later WHERE url = ?`, url)
+	if err != nil {
+		return false
 	}
-	return false
+	n, _ := res.RowsAffected()
+	return n > 0
 }
 
 // MarkRead marks an item as read.
 func (rl *ReadLaterStore) MarkRead(url string) {
-	for i, item := range rl.items {
-		if item.URL == url {
-			rl.items[i].Read = true
-			rl.save()
-			return
-		}
-	}
+	rl.db.Exec(`UPDATE read_later SET is_read = 1 WHERE url = ?`, url)
 }
 
 // ListUnread returns unread items, oldest first.
 func (rl *ReadLaterStore) ListUnread() []ReadLaterItem {
-	var results []ReadLaterItem
-	for _, item := range rl.items {
-		if !item.Read {
-			results = append(results, item)
-		}
+	rows, err := rl.db.Query(
+		`SELECT id, url, title, is_read, created_at FROM read_later
+		 WHERE is_read = 0 ORDER BY created_at ASC`,
+	)
+	if err != nil {
+		return nil
 	}
-	sort.Slice(results, func(i, j int) bool {
-		return results[i].CreatedAt.Before(results[j].CreatedAt)
-	})
-	return results
+	defer rows.Close()
+	return scanReadLaterItems(rows)
 }
 
 // ListAll returns all items, newest first.
 func (rl *ReadLaterStore) ListAll() []ReadLaterItem {
-	result := make([]ReadLaterItem, len(rl.items))
-	copy(result, rl.items)
-	sort.Slice(result, func(i, j int) bool {
-		return result[i].CreatedAt.After(result[j].CreatedAt)
-	})
-	return result
+	rows, err := rl.db.Query(
+		`SELECT id, url, title, is_read, created_at FROM read_later ORDER BY created_at DESC`,
+	)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	return scanReadLaterItems(rows)
 }
 
 // Count returns total items.
 func (rl *ReadLaterStore) Count() int {
-	return len(rl.items)
+	var count int
+	rl.db.QueryRow(`SELECT COUNT(*) FROM read_later`).Scan(&count)
+	return count
 }
 
 // UnreadCount returns the number of unread items.
 func (rl *ReadLaterStore) UnreadCount() int {
-	n := 0
-	for _, item := range rl.items {
-		if !item.Read {
-			n++
+	var count int
+	rl.db.QueryRow(`SELECT COUNT(*) FROM read_later WHERE is_read = 0`).Scan(&count)
+	return count
+}
+
+func scanReadLaterItems(rows *sql.Rows) []ReadLaterItem {
+	var items []ReadLaterItem
+	for rows.Next() {
+		var item ReadLaterItem
+		var isRead int
+		var createdAt string
+		if err := rows.Scan(&item.ID, &item.URL, &item.Title, &isRead, &createdAt); err != nil {
+			continue
 		}
+		item.Read = isRead == 1
+		item.CreatedAt, _ = time.Parse("2006-01-02 15:04:05", createdAt)
+		items = append(items, item)
 	}
-	return n
-}
-
-func (rl *ReadLaterStore) load() error {
-	data, err := os.ReadFile(rl.path)
-	if err != nil {
-		return err
-	}
-	return json.Unmarshal(data, &rl.items)
-}
-
-func (rl *ReadLaterStore) save() error {
-	data, err := json.MarshalIndent(rl.items, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(rl.path, data, 0o644)
+	return items
 }
 
 // RenderReadLater formats read-later items for the viewport.

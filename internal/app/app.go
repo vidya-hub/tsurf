@@ -68,6 +68,7 @@ type Model struct {
 	rssClient    *feeds.RSSClient
 
 	// Storage
+	db        *storage.DB
 	bookmarks *storage.BookmarkStore
 	readLater *storage.ReadLaterStore
 	config    *storage.Config
@@ -126,9 +127,13 @@ func New(startURL string) Model {
 	// Initialize storage (best-effort, non-fatal on error).
 	dataDir, err := storage.DataDir()
 	if err == nil {
-		m.bookmarks, _ = storage.NewBookmarkStore(dataDir)
-		m.readLater, _ = storage.NewReadLaterStore(dataDir)
-		m.historyStore, _ = storage.NewHistoryStore(dataDir)
+		db, dbErr := storage.OpenDB(dataDir)
+		if dbErr == nil {
+			m.db = db
+			m.bookmarks = storage.NewBookmarkStore(db)
+			m.readLater = storage.NewReadLaterStore(db)
+			m.historyStore = storage.NewHistoryStore(db)
+		}
 	}
 	m.config, _ = storage.LoadConfig()
 	m.historyPanel = ui.NewHistoryPanel()

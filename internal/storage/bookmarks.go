@@ -1,11 +1,9 @@
 package storage
 
 import (
-	"encoding/json"
+	"database/sql"
 	"fmt"
-	"os"
-	"path/filepath"
-	"sort"
+	"strings"
 	"time"
 
 	"github.com/vidyasagar/tsurf/internal/browser"
@@ -13,115 +11,105 @@ import (
 
 // Bookmark represents a saved page.
 type Bookmark struct {
-	URL       string    `json:"url"`
-	Title     string    `json:"title"`
-	Tags      []string  `json:"tags,omitempty"`
-	CreatedAt time.Time `json:"created_at"`
+	ID        int64
+	URL       string
+	Title     string
+	Tags      []string
+	CreatedAt time.Time
 }
 
-// BookmarkStore manages bookmarks persisted to a JSON file.
+// BookmarkStore manages bookmarks persisted in SQLite.
 type BookmarkStore struct {
-	bookmarks []Bookmark
-	path      string
+	db *sql.DB
 }
 
-// NewBookmarkStore creates a bookmark store at the given data directory.
-func NewBookmarkStore(dataDir string) (*BookmarkStore, error) {
-	if err := os.MkdirAll(dataDir, 0o755); err != nil {
-		return nil, fmt.Errorf("creating data dir: %w", err)
-	}
-
-	path := filepath.Join(dataDir, "bookmarks.json")
-	bs := &BookmarkStore{path: path}
-
-	if err := bs.load(); err != nil && !os.IsNotExist(err) {
-		return nil, fmt.Errorf("loading bookmarks: %w", err)
-	}
-
-	return bs, nil
+// NewBookmarkStore creates a bookmark store using the given database.
+func NewBookmarkStore(db *DB) *BookmarkStore {
+	return &BookmarkStore{db: db.Conn()}
 }
 
 // Add adds a bookmark. Returns false if already bookmarked.
 func (bs *BookmarkStore) Add(url, title string, tags ...string) bool {
-	for _, b := range bs.bookmarks {
-		if b.URL == url {
-			return false // already exists
-		}
+	tagStr := strings.Join(tags, ",")
+	_, err := bs.db.Exec(
+		`INSERT OR IGNORE INTO bookmarks (url, title, tags) VALUES (?, ?, ?)`,
+		url, title, tagStr,
+	)
+	if err != nil {
+		return false
 	}
-
-	bs.bookmarks = append(bs.bookmarks, Bookmark{
-		URL:       url,
-		Title:     title,
-		Tags:      tags,
-		CreatedAt: time.Now(),
-	})
-
-	bs.save()
+	// INSERT OR IGNORE returns RowsAffected=0 if it was a duplicate.
 	return true
 }
 
 // Remove removes a bookmark by URL. Returns false if not found.
 func (bs *BookmarkStore) Remove(url string) bool {
-	for i, b := range bs.bookmarks {
-		if b.URL == url {
-			bs.bookmarks = append(bs.bookmarks[:i], bs.bookmarks[i+1:]...)
-			bs.save()
-			return true
-		}
+	res, err := bs.db.Exec(`DELETE FROM bookmarks WHERE url = ?`, url)
+	if err != nil {
+		return false
 	}
-	return false
+	n, _ := res.RowsAffected()
+	return n > 0
 }
 
 // Has reports whether a URL is bookmarked.
 func (bs *BookmarkStore) Has(url string) bool {
-	for _, b := range bs.bookmarks {
-		if b.URL == url {
-			return true
-		}
-	}
-	return false
+	var count int
+	err := bs.db.QueryRow(`SELECT COUNT(*) FROM bookmarks WHERE url = ?`, url).Scan(&count)
+	return err == nil && count > 0
 }
 
 // List returns all bookmarks, newest first.
 func (bs *BookmarkStore) List() []Bookmark {
-	result := make([]Bookmark, len(bs.bookmarks))
-	copy(result, bs.bookmarks)
-	sort.Slice(result, func(i, j int) bool {
-		return result[i].CreatedAt.After(result[j].CreatedAt)
-	})
-	return result
+	rows, err := bs.db.Query(
+		`SELECT id, url, title, tags, created_at FROM bookmarks ORDER BY created_at DESC`,
+	)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	return scanBookmarks(rows)
 }
 
 // Search finds bookmarks matching a query (title or URL contains query).
 func (bs *BookmarkStore) Search(query string) []Bookmark {
-	var results []Bookmark
-	for _, b := range bs.bookmarks {
-		if contains(b.Title, query) || contains(b.URL, query) {
-			results = append(results, b)
-		}
+	like := "%" + query + "%"
+	rows, err := bs.db.Query(
+		`SELECT id, url, title, tags, created_at FROM bookmarks
+		 WHERE title LIKE ? OR url LIKE ?
+		 ORDER BY created_at DESC`,
+		like, like,
+	)
+	if err != nil {
+		return nil
 	}
-	return results
+	defer rows.Close()
+	return scanBookmarks(rows)
 }
 
 // Count returns the number of bookmarks.
 func (bs *BookmarkStore) Count() int {
-	return len(bs.bookmarks)
+	var count int
+	bs.db.QueryRow(`SELECT COUNT(*) FROM bookmarks`).Scan(&count)
+	return count
 }
 
-func (bs *BookmarkStore) load() error {
-	data, err := os.ReadFile(bs.path)
-	if err != nil {
-		return err
+func scanBookmarks(rows *sql.Rows) []Bookmark {
+	var bookmarks []Bookmark
+	for rows.Next() {
+		var b Bookmark
+		var tagStr string
+		var createdAt string
+		if err := rows.Scan(&b.ID, &b.URL, &b.Title, &tagStr, &createdAt); err != nil {
+			continue
+		}
+		if tagStr != "" {
+			b.Tags = strings.Split(tagStr, ",")
+		}
+		b.CreatedAt, _ = time.Parse("2006-01-02 15:04:05", createdAt)
+		bookmarks = append(bookmarks, b)
 	}
-	return json.Unmarshal(data, &bs.bookmarks)
-}
-
-func (bs *BookmarkStore) save() error {
-	data, err := json.MarshalIndent(bs.bookmarks, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(bs.path, data, 0o644)
+	return bookmarks
 }
 
 // RenderBookmarks formats bookmarks for the viewport.
@@ -142,7 +130,7 @@ func RenderBookmarks(bookmarks []Bookmark) (string, []browser.Link) {
 		result += fmt.Sprintf("  [%d] %s\n", idx, b.Title)
 		result += fmt.Sprintf("       %s\n", b.URL)
 		if len(b.Tags) > 0 {
-			result += fmt.Sprintf("       tags: %s\n", joinStrings(b.Tags, ", "))
+			result += fmt.Sprintf("       tags: %s\n", strings.Join(b.Tags, ", "))
 		}
 		result += fmt.Sprintf("       saved %s\n\n", timeAgoStore(b.CreatedAt))
 
@@ -154,15 +142,4 @@ func RenderBookmarks(bookmarks []Bookmark) (string, []browser.Link) {
 	}
 
 	return result, links
-}
-
-func joinStrings(ss []string, sep string) string {
-	result := ""
-	for i, s := range ss {
-		if i > 0 {
-			result += sep
-		}
-		result += s
-	}
-	return result
 }

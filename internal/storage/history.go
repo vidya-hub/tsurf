@@ -1,141 +1,140 @@
 package storage
 
 import (
-	"encoding/json"
-	"fmt"
-	"os"
-	"path/filepath"
-	"sort"
+	"database/sql"
 	"time"
 )
 
 // HistoryEntry represents a single visited page.
 type HistoryEntry struct {
-	URL       string    `json:"url"`
-	Title     string    `json:"title"`
-	VisitedAt time.Time `json:"visited_at"`
+	ID        int64
+	URL       string
+	Title     string
+	VisitedAt time.Time
 }
 
-// HistoryStore manages persistent browsing history.
+// HistoryStore manages persistent browsing history in SQLite.
 type HistoryStore struct {
-	entries []HistoryEntry
-	path    string
-	maxSize int // max number of entries to keep
+	db      *sql.DB
+	maxSize int
 }
 
-// NewHistoryStore creates a history store at the given data directory.
-func NewHistoryStore(dataDir string) (*HistoryStore, error) {
-	if err := os.MkdirAll(dataDir, 0o755); err != nil {
-		return nil, fmt.Errorf("creating data dir: %w", err)
-	}
-
-	path := filepath.Join(dataDir, "history.json")
-	hs := &HistoryStore{
-		path:    path,
+// NewHistoryStore creates a history store using the given database.
+func NewHistoryStore(db *DB) *HistoryStore {
+	return &HistoryStore{
+		db:      db.Conn(),
 		maxSize: 1000,
 	}
-
-	if err := hs.load(); err != nil && !os.IsNotExist(err) {
-		return nil, fmt.Errorf("loading history: %w", err)
-	}
-
-	return hs, nil
 }
 
-// Add records a page visit. If the URL was already the most recent entry,
+// Add records a page visit. If the URL matches the most recent entry,
 // it updates the timestamp instead of creating a duplicate.
 func (hs *HistoryStore) Add(url, title string) {
 	if url == "" {
 		return
 	}
 
-	now := time.Now()
+	// Check if the most recent entry is the same URL.
+	var lastURL string
+	err := hs.db.QueryRow(
+		`SELECT url FROM history ORDER BY visited_at DESC LIMIT 1`,
+	).Scan(&lastURL)
 
-	// If the last entry is the same URL, just update the timestamp.
-	if len(hs.entries) > 0 && hs.entries[0].URL == url {
-		hs.entries[0].VisitedAt = now
-		if title != "" {
-			hs.entries[0].Title = title
-		}
-		hs.save()
+	if err == nil && lastURL == url {
+		// Update existing entry.
+		hs.db.Exec(
+			`UPDATE history SET visited_at = datetime('now'), title = CASE WHEN ? != '' THEN ? ELSE title END
+			 WHERE id = (SELECT id FROM history ORDER BY visited_at DESC LIMIT 1)`,
+			title, title,
+		)
 		return
 	}
 
-	entry := HistoryEntry{
-		URL:       url,
-		Title:     title,
-		VisitedAt: now,
-	}
-
-	// Prepend (newest first).
-	hs.entries = append([]HistoryEntry{entry}, hs.entries...)
+	// Insert new entry.
+	hs.db.Exec(
+		`INSERT INTO history (url, title) VALUES (?, ?)`,
+		url, title,
+	)
 
 	// Trim if over max.
-	if len(hs.entries) > hs.maxSize {
-		hs.entries = hs.entries[:hs.maxSize]
-	}
-
-	hs.save()
+	hs.db.Exec(
+		`DELETE FROM history WHERE id NOT IN (
+			SELECT id FROM history ORDER BY visited_at DESC LIMIT ?
+		)`,
+		hs.maxSize,
+	)
 }
 
 // List returns all history entries, newest first.
 func (hs *HistoryStore) List() []HistoryEntry {
-	result := make([]HistoryEntry, len(hs.entries))
-	copy(result, hs.entries)
-	return result
+	rows, err := hs.db.Query(
+		`SELECT id, url, title, visited_at FROM history ORDER BY visited_at DESC`,
+	)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	return scanHistoryEntries(rows)
 }
 
 // Search finds entries matching a query in title or URL.
 func (hs *HistoryStore) Search(query string) []HistoryEntry {
-	var results []HistoryEntry
-	for _, e := range hs.entries {
-		if contains(e.Title, query) || contains(e.URL, query) {
-			results = append(results, e)
-		}
+	like := "%" + query + "%"
+	rows, err := hs.db.Query(
+		`SELECT id, url, title, visited_at FROM history
+		 WHERE title LIKE ? OR url LIKE ?
+		 ORDER BY visited_at DESC`,
+		like, like,
+	)
+	if err != nil {
+		return nil
 	}
-	return results
+	defer rows.Close()
+	return scanHistoryEntries(rows)
 }
 
-// Remove deletes a history entry by index (0-based).
+// Remove deletes a history entry by index (0-based, from newest-first ordering).
 func (hs *HistoryStore) Remove(idx int) bool {
-	if idx < 0 || idx >= len(hs.entries) {
+	// Get the ID of the entry at the given index.
+	var id int64
+	err := hs.db.QueryRow(
+		`SELECT id FROM history ORDER BY visited_at DESC LIMIT 1 OFFSET ?`,
+		idx,
+	).Scan(&id)
+	if err != nil {
 		return false
 	}
-	hs.entries = append(hs.entries[:idx], hs.entries[idx+1:]...)
-	hs.save()
-	return true
+
+	res, err := hs.db.Exec(`DELETE FROM history WHERE id = ?`, id)
+	if err != nil {
+		return false
+	}
+	n, _ := res.RowsAffected()
+	return n > 0
 }
 
 // Clear removes all history entries.
 func (hs *HistoryStore) Clear() {
-	hs.entries = nil
-	hs.save()
+	hs.db.Exec(`DELETE FROM history`)
 }
 
 // Count returns the number of history entries.
 func (hs *HistoryStore) Count() int {
-	return len(hs.entries)
+	var count int
+	hs.db.QueryRow(`SELECT COUNT(*) FROM history`).Scan(&count)
+	return count
 }
 
-// SortByTime sorts entries newest first.
-func (hs *HistoryStore) SortByTime() {
-	sort.Slice(hs.entries, func(i, j int) bool {
-		return hs.entries[i].VisitedAt.After(hs.entries[j].VisitedAt)
-	})
-}
-
-func (hs *HistoryStore) load() error {
-	data, err := os.ReadFile(hs.path)
-	if err != nil {
-		return err
+func scanHistoryEntries(rows *sql.Rows) []HistoryEntry {
+	var entries []HistoryEntry
+	for rows.Next() {
+		var e HistoryEntry
+		var visitedAt string
+		if err := rows.Scan(&e.ID, &e.URL, &e.Title, &visitedAt); err != nil {
+			continue
+		}
+		e.VisitedAt, _ = time.Parse("2006-01-02 15:04:05", visitedAt)
+		entries = append(entries, e)
 	}
-	return json.Unmarshal(data, &hs.entries)
-}
-
-func (hs *HistoryStore) save() error {
-	data, err := json.MarshalIndent(hs.entries, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(hs.path, data, 0o644)
+	return entries
 }
