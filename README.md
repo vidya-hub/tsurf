@@ -132,13 +132,21 @@ tsurf
 
 Press `Space` in normal mode to open a centered shortcut palette. It auto-dismisses after 2 seconds or on any keypress.
 
-| Navigate | Tabs | Feeds | Tools | Views |
-|----------|------|-------|-------|-------|
-| `o` Open URL | `t` New tab | `h` Hacker News | `B` Bookmarks | `H` History |
-| `b` Back | `w` Close tab | `e` Reddit | `R` Read later | `v` Split vertical |
-| `f` Forward | `n` Next tab | `s` Search | `/` Search page | `x` Close split |
-| `l` Follow link | `p` Prev tab | `a` RSS feed | `:` Command | `T` Theme cycle |
-| `r` Reload | | | | `?` Help |
+| Key | Navigate        | Key | Tabs        | Key | Feeds        |
+|-----|-----------------|-----|-------------|-----|--------------|
+| `o` | Open URL        | `t` | New tab     | `h` | Hacker News  |
+| `b` | Back            | `w` | Close tab   | `e` | Reddit       |
+| `f` | Forward         | `n` | Next tab    | `s` | Search       |
+| `l` | Follow link     | `p` | Prev tab    | `a` | RSS feed     |
+| `r` | Reload          |     |             |     |              |
+
+| Key | Tools           | Key | Views           |
+|-----|-----------------|-----|-----------------|
+| `B` | Bookmarks       | `H` | History         |
+| `R` | Read later      | `v` | Split vertical  |
+| `/` | Search page     | `x` | Close split     |
+| `:` | Command         | `T` | Theme cycle     |
+|     |                 | `?` | Help            |
 
 ---
 
