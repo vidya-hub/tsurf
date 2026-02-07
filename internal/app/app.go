@@ -267,20 +267,10 @@ func (m Model) View() string {
 	// Overlay the leader palette if active.
 	if m.leaderPanel.IsVisible() {
 		overlay := m.leaderPanel.View()
-		overlayWidth := lipgloss.Width(overlay)
-		overlayHeight := lipgloss.Height(overlay)
-
-		// Center the overlay.
-		x := (m.width - overlayWidth) / 2
-		if x < 0 {
-			x = 0
-		}
-		y := (m.height - overlayHeight) / 2
-		if y < 0 {
-			y = 0
-		}
-
-		result = placeOverlay(x, y, overlay, result)
+		result = lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, overlay,
+			lipgloss.WithWhitespaceChars(" "),
+			lipgloss.WithWhitespaceForeground(theme.Current.Background),
+		)
 	}
 
 	return result
@@ -908,52 +898,6 @@ func (m Model) cycleTheme() (tea.Model, tea.Cmd) {
 		m.statusBar.SetMessage(fmt.Sprintf("Theme: %s", themes[0]))
 	}
 	return m, nil
-}
-
-// placeOverlay renders an overlay string on top of a background string at position (x, y).
-func placeOverlay(x, y int, overlay, background string) string {
-	bgLines := strings.Split(background, "\n")
-	olLines := strings.Split(overlay, "\n")
-
-	for i, olLine := range olLines {
-		bgIdx := y + i
-		if bgIdx < 0 || bgIdx >= len(bgLines) {
-			continue
-		}
-
-		bgLine := bgLines[bgIdx]
-		bgRunes := []rune(bgLine)
-		olRunes := []rune(olLine)
-
-		// Build the new line: bg prefix + overlay + bg suffix.
-		var result []rune
-
-		// Prefix from background.
-		if x > 0 {
-			if x <= len(bgRunes) {
-				result = append(result, bgRunes[:x]...)
-			} else {
-				result = append(result, bgRunes...)
-				// Pad with spaces.
-				for j := len(bgRunes); j < x; j++ {
-					result = append(result, ' ')
-				}
-			}
-		}
-
-		// Overlay content.
-		result = append(result, olRunes...)
-
-		// Suffix from background.
-		suffixStart := x + len(olRunes)
-		if suffixStart < len(bgRunes) {
-			result = append(result, bgRunes[suffixStart:]...)
-		}
-
-		bgLines[bgIdx] = string(result)
-	}
-
-	return strings.Join(bgLines, "\n")
 }
 
 // handleInsertMode processes keys when the URL bar is focused.

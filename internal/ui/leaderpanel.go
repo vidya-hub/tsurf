@@ -1,10 +1,10 @@
 package ui
 
 import (
-	"fmt"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/lipgloss/table"
 	"github.com/vidyasagar/tsurf/internal/theme"
 )
 
@@ -129,20 +129,6 @@ func (lp *LeaderPanel) View() string {
 		Bold(true).
 		Foreground(t.Primary)
 
-	groupNameStyle := lipgloss.NewStyle().
-		Bold(true).
-		Foreground(t.Accent).
-		Underline(true)
-
-	keyBadgeStyle := lipgloss.NewStyle().
-		Bold(true).
-		Foreground(t.Background).
-		Background(t.Secondary).
-		Padding(0, 1)
-
-	descStyle := lipgloss.NewStyle().
-		Foreground(t.Text)
-
 	dimStyle := lipgloss.NewStyle().
 		Foreground(t.TextDim).
 		Italic(true)
@@ -150,15 +136,26 @@ func (lp *LeaderPanel) View() string {
 	separatorStyle := lipgloss.NewStyle().
 		Foreground(t.Border)
 
-	// ── Layout constants ────────────────────────────────────────
+	// Per-group table cell styles.
+	headerStyle := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(t.Accent).
+		Padding(0, 1).
+		Align(lipgloss.Center)
 
-	const (
-		colWidth = 18 // width of each group column
-		keyWidth = 3  // width of the key badge
-		gapWidth = 3  // gap between columns (includes separator)
-	)
+	keyCellStyle := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(t.Background).
+		Background(t.Secondary).
+		Padding(0, 1).
+		Align(lipgloss.Center)
 
-	// Find max rows across all groups for uniform column heights.
+	descCellStyle := lipgloss.NewStyle().
+		Foreground(t.Text).
+		PaddingRight(1)
+
+	// ── Find max rows for uniform height ────────────────────────
+
 	maxRows := 0
 	for _, g := range lp.groups {
 		if len(g.Bindings) > maxRows {
@@ -166,64 +163,65 @@ func (lp *LeaderPanel) View() string {
 		}
 	}
 
-	// ── Render each group column ────────────────────────────────
+	// ── Build one table per group ───────────────────────────────
 
-	colStyle := lipgloss.NewStyle().Width(colWidth)
+	groupTables := make([]string, len(lp.groups))
+	for gi, group := range lp.groups {
+		tbl := table.New().
+			Headers(group.Icon+" "+group.Name, "").
+			Border(lipgloss.HiddenBorder()).
+			BorderColumn(false).
+			BorderHeader(true).
+			BorderRow(false).
+			BorderStyle(separatorStyle).
+			StyleFunc(func(row, col int) lipgloss.Style {
+				if row == table.HeaderRow {
+					return headerStyle
+				}
+				if col == 0 {
+					return keyCellStyle
+				}
+				return descCellStyle
+			})
 
-	var columns []string
-	for i, group := range lp.groups {
-		var lines []string
-
-		// Group header line.
-		header := groupNameStyle.Render(group.Icon + " " + group.Name)
-		lines = append(lines, header)
-		lines = append(lines, "") // blank line after header
-
-		// Binding rows.
+		// Add binding rows.
 		for _, b := range group.Bindings {
-			badge := keyBadgeStyle.Render(fmt.Sprintf("%-1s", b.Key))
-			desc := descStyle.Render(" " + b.Desc)
-			lines = append(lines, badge+desc)
+			tbl.Row(b.Key, b.Desc)
 		}
-
-		// Pad to uniform height.
+		// Pad with empty rows so all groups have the same height.
 		for j := len(group.Bindings); j < maxRows; j++ {
-			lines = append(lines, "")
+			tbl.Row("", "")
 		}
 
-		col := colStyle.Render(strings.Join(lines, "\n"))
-		columns = append(columns, col)
+		groupTables[gi] = tbl.Render()
+	}
 
-		// Vertical separator between groups.
-		if i < len(lp.groups)-1 {
-			sepHeight := lipgloss.Height(col)
-			var sepLines []string
-			for s := 0; s < sepHeight; s++ {
-				sepLines = append(sepLines, separatorStyle.Render(" │ "))
+	// ── Join group tables horizontally with vertical separators ─
+
+	var parts []string
+	for i, gt := range groupTables {
+		parts = append(parts, gt)
+		if i < len(groupTables)-1 {
+			h := lipgloss.Height(gt)
+			sep := make([]string, h)
+			for s := range sep {
+				sep[s] = separatorStyle.Render(" │ ")
 			}
-			columns = append(columns, strings.Join(sepLines, "\n"))
+			parts = append(parts, strings.Join(sep, "\n"))
 		}
 	}
 
-	body := lipgloss.JoinHorizontal(lipgloss.Top, columns...)
+	body := lipgloss.JoinHorizontal(lipgloss.Top, parts...)
 
 	// ── Assemble final content ──────────────────────────────────
 
 	bodyWidth := lipgloss.Width(body)
 
-	headerText := "⚡ Leader Key"
-	headerLine := titleStyle.Render(headerText)
-
-	// Horizontal rule under header, matching body width.
+	headerLine := titleStyle.Render("⚡ Leader Key")
 	rule := separatorStyle.Render(strings.Repeat("─", bodyWidth))
 
 	footerText := dimStyle.Render("press a key or Esc to dismiss")
-	// Center the footer.
-	footerPad := ""
-	fw := lipgloss.Width(footerText)
-	if fw < bodyWidth {
-		footerPad = strings.Repeat(" ", (bodyWidth-fw)/2)
-	}
+	footerLine := lipgloss.PlaceHorizontal(bodyWidth, lipgloss.Center, footerText)
 
 	content := lipgloss.JoinVertical(lipgloss.Left,
 		headerLine,
@@ -232,7 +230,7 @@ func (lp *LeaderPanel) View() string {
 		body,
 		"",
 		rule,
-		footerPad+footerText,
+		footerLine,
 	)
 
 	// ── Outer box ───────────────────────────────────────────────
