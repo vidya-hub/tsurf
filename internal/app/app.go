@@ -68,6 +68,7 @@ type Model struct {
 	hnClient     *feeds.HNClient
 	redditClient *feeds.RedditClient
 	rssClient    *feeds.RSSClient
+	githubClient *feeds.GitHubClient
 
 	// Storage
 	db        *storage.DB
@@ -128,6 +129,7 @@ func New(startURL string) Model {
 		hnClient:     feeds.NewHNClient(),
 		redditClient: feeds.NewRedditClient(),
 		rssClient:    feeds.NewRSSClient(),
+		githubClient: feeds.NewGitHubClient(),
 	}
 
 	// Initialize storage (best-effort, non-fatal on error).
@@ -1210,6 +1212,23 @@ func (m Model) loadPage(url string, pushHistory bool) tea.Cmd {
 		client := m.redditClient
 		return func() tea.Msg {
 			content, title, links, err := client.FetchURL(redditInfo)
+			if err != nil {
+				return feedLoadedMsg{tabID: tabID, err: err}
+			}
+			return feedLoadedMsg{tabID: tabID, content: content, title: title, links: links}
+		}
+	}
+
+	// Intercept GitHub URLs and use GitHub API for rich rendering.
+	githubInfo := feeds.ParseGitHubURL(url)
+	if githubInfo != nil && githubInfo.Type != feeds.GitHubURLNone {
+		client := m.githubClient
+		width := m.width
+		if width <= 0 {
+			width = 80
+		}
+		return func() tea.Msg {
+			content, title, links, err := client.FetchURL(githubInfo, width)
 			if err != nil {
 				return feedLoadedMsg{tabID: tabID, err: err}
 			}
