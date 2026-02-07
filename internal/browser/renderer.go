@@ -3,11 +3,19 @@ package browser
 import (
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/PuerkitoBio/goquery"
 	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/vidyasagar/tsurf/internal/theme"
+)
+
+// Cached glamour renderer to avoid recreation on every render call.
+var (
+	cachedRenderer      *glamour.TermRenderer
+	cachedRendererWidth int
+	rendererMu          sync.Mutex
 )
 
 // RenderedPage holds the final terminal-ready output.
@@ -78,16 +86,25 @@ func Render(article *Article, width int) *RenderedPage {
 }
 
 // renderWithGlamour uses glamour to render markdown into styled terminal output.
+// Uses a cached renderer to avoid expensive recreation on every call.
 func renderWithGlamour(markdown string, width int) (string, error) {
-	renderer, err := glamour.NewTermRenderer(
-		glamour.WithAutoStyle(),
-		glamour.WithWordWrap(width),
-	)
-	if err != nil {
-		return "", err
+	rendererMu.Lock()
+	defer rendererMu.Unlock()
+
+	// Recreate renderer only if width changed or not initialized.
+	if cachedRenderer == nil || cachedRendererWidth != width {
+		renderer, err := glamour.NewTermRenderer(
+			glamour.WithAutoStyle(),
+			glamour.WithWordWrap(width),
+		)
+		if err != nil {
+			return "", err
+		}
+		cachedRenderer = renderer
+		cachedRendererWidth = width
 	}
 
-	out, err := renderer.Render(markdown)
+	out, err := cachedRenderer.Render(markdown)
 	if err != nil {
 		return "", err
 	}

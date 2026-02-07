@@ -10,6 +10,7 @@ import (
 	"github.com/charmbracelet/bubbles/key"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	lru "github.com/hashicorp/golang-lru/v2"
 	"github.com/vidyasagar/tsurf/internal/browser"
 	"github.com/vidyasagar/tsurf/internal/feeds"
 	"github.com/vidyasagar/tsurf/internal/storage"
@@ -53,14 +54,15 @@ type Model struct {
 	tabStates map[int]*tabState
 
 	// Shared state
-	fetcher  *browser.Fetcher
-	keys     KeyMap
-	mode     Mode
-	width    int
-	height   int
-	lastGKey bool // for "gg" detection
-	ready    bool
-	startURL string
+	fetcher   *browser.Fetcher
+	pageCache *lru.Cache[string, *browser.RenderedPage] // LRU cache for rendered pages
+	keys      KeyMap
+	mode      Mode
+	width     int
+	height    int
+	lastGKey  bool // for "gg" detection
+	ready     bool
+	startURL  string
 
 	// Feeds
 	hnClient     *feeds.HNClient
@@ -106,6 +108,9 @@ func New(startURL string) Model {
 	tb := ui.NewTabBar()
 	initialTab := tb.ActiveTab()
 
+	// Initialize page cache (stores up to 50 rendered pages for instant back/forward).
+	pageCache, _ := lru.New[string, *browser.RenderedPage](50)
+
 	m := Model{
 		tabBar:     tb,
 		urlBar:     ui.NewURLBar(),
@@ -114,6 +119,7 @@ func New(startURL string) Model {
 		splitPane:  ui.NewSplitPane(),
 		tabStates:  make(map[int]*tabState),
 		fetcher:    browser.NewFetcher(),
+		pageCache:  pageCache,
 		keys:       DefaultKeyMap(),
 		mode:       ModeNormal,
 		startURL:   startURL,
@@ -1170,6 +1176,23 @@ func (m Model) loadPage(url string, pushHistory bool) tea.Cmd {
 		ts.cancelFunc()
 	}
 
+	// Check page cache first (for instant back/forward navigation).
+	if m.pageCache != nil {
+		if cachedPage, ok := m.pageCache.Get(url); ok {
+			// Return cached page immediately.
+			ts.loading = false
+			m.statusBar.SetLoading(false)
+			m.urlBar.SetValue(url)
+			m.tabBar.SetActiveURL(url)
+			if pushHistory {
+				ts.history.Push(url)
+			}
+			return func() tea.Msg {
+				return pageLoadedMsg{tabID: tabID, page: cachedPage, url: url}
+			}
+		}
+	}
+
 	ts.loading = true
 	m.statusBar.SetLoading(true)
 	m.statusBar.SetMessage("")
@@ -1198,6 +1221,13 @@ func (m Model) loadPage(url string, pushHistory bool) tea.Cmd {
 	ts.cancelFunc = cancel
 
 	fetcher := m.fetcher
+	pageCache := m.pageCache
+	// Capture width for the goroutine (use actual terminal width, constrained for readability).
+	renderWidth := m.width
+	if renderWidth <= 0 {
+		renderWidth = 80
+	}
+
 	return func() tea.Msg {
 		result, err := fetcher.FetchWithContext(ctx, url)
 		if err != nil {
@@ -1209,7 +1239,13 @@ func (m Model) loadPage(url string, pushHistory bool) tea.Cmd {
 			return pageLoadedMsg{tabID: tabID, err: err, url: url}
 		}
 
-		page := browser.Render(article, 80)
+		page := browser.Render(article, renderWidth)
+
+		// Store in cache for future back/forward navigation.
+		if pageCache != nil {
+			pageCache.Add(result.FinalURL, page)
+		}
+
 		return pageLoadedMsg{tabID: tabID, page: page, url: result.FinalURL}
 	}
 }

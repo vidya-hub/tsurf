@@ -1,20 +1,25 @@
 package feeds
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"sort"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/vidyasagar/tsurf/internal/browser"
 )
 
 const (
-	hnBaseURL  = "https://hacker-news.firebaseio.com/v0"
-	hnMaxItems = 30
-	hnTimeout  = 10 * time.Second
+	hnBaseURL     = "https://hacker-news.firebaseio.com/v0"
+	hnMaxItems    = 30
+	hnTimeout     = 10 * time.Second
+	hnConcurrency = 10          // parallel fetches
+	hnMaxBodySize = 1024 * 1024 // 1MB limit per API response
 )
 
 // HNStory represents a Hacker News story.
@@ -48,10 +53,13 @@ type HNClient struct {
 	client *http.Client
 }
 
-// NewHNClient creates a new HN API client.
+// NewHNClient creates a new HN API client using the shared transport.
 func NewHNClient() *HNClient {
 	return &HNClient{
-		client: &http.Client{Timeout: hnTimeout},
+		client: &http.Client{
+			Transport: browser.SharedTransport,
+			Timeout:   hnTimeout,
+		},
 	}
 }
 
@@ -80,7 +88,7 @@ func (h *HNClient) ShowStories(limit int) ([]HNStory, error) {
 	return h.fetchStories("showstories", limit)
 }
 
-// FetchComments fetches comments for a story (top-level only).
+// FetchComments fetches comments for a story (top-level only) in parallel.
 func (h *HNClient) FetchComments(story *HNStory, limit int) ([]HNComment, error) {
 	if limit <= 0 || limit > 50 {
 		limit = 20
@@ -91,15 +99,53 @@ func (h *HNClient) FetchComments(story *HNStory, limit int) ([]HNComment, error)
 		kids = kids[:limit]
 	}
 
+	// Fetch comments in parallel
+	type result struct {
+		idx     int
+		comment HNComment
+		ok      bool
+	}
+
+	results := make(chan result, len(kids))
+	sem := make(chan struct{}, hnConcurrency)
+
+	var wg sync.WaitGroup
+	for i, id := range kids {
+		wg.Add(1)
+		go func(idx, commentID int) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			var comment HNComment
+			if err := h.fetchItem(commentID, &comment); err != nil {
+				results <- result{idx: idx, ok: false}
+				return
+			}
+			if comment.Deleted || comment.Dead {
+				results <- result{idx: idx, ok: false}
+				return
+			}
+			results <- result{idx: idx, comment: comment, ok: true}
+		}(i, id)
+	}
+
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	// Collect and sort by original order
 	comments := make([]HNComment, 0, len(kids))
-	for _, id := range kids {
-		var comment HNComment
-		err := h.fetchItem(id, &comment)
-		if err != nil {
-			continue
+	collected := make(map[int]HNComment)
+	for r := range results {
+		if r.ok {
+			collected[r.idx] = r.comment
 		}
-		if !comment.Deleted && !comment.Dead {
-			comments = append(comments, comment)
+	}
+	for i := 0; i < len(kids); i++ {
+		if c, ok := collected[i]; ok {
+			comments = append(comments, c)
 		}
 	}
 
@@ -118,7 +164,7 @@ func (h *HNClient) fetchStories(endpoint string, limit int) ([]HNStory, error) {
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, hnMaxBodySize))
 	if err != nil {
 		return nil, fmt.Errorf("reading response: %w", err)
 	}
@@ -132,30 +178,76 @@ func (h *HNClient) fetchStories(endpoint string, limit int) ([]HNStory, error) {
 		ids = ids[:limit]
 	}
 
-	stories := make([]HNStory, 0, len(ids))
-	for _, id := range ids {
-		var story HNStory
-		if err := h.fetchItem(id, &story); err != nil {
-			continue
+	// Fetch stories in parallel with bounded concurrency
+	type storyResult struct {
+		idx   int
+		story HNStory
+		ok    bool
+	}
+
+	results := make(chan storyResult, len(ids))
+	sem := make(chan struct{}, hnConcurrency)
+
+	var wg sync.WaitGroup
+	for i, id := range ids {
+		wg.Add(1)
+		go func(idx, storyID int) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			var story HNStory
+			if err := h.fetchItem(storyID, &story); err != nil {
+				results <- storyResult{idx: idx, ok: false}
+				return
+			}
+			results <- storyResult{idx: idx, story: story, ok: true}
+		}(i, id)
+	}
+
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	// Collect results preserving order
+	collected := make(map[int]HNStory)
+	for r := range results {
+		if r.ok {
+			collected[r.idx] = r.story
 		}
-		stories = append(stories, story)
+	}
+
+	stories := make([]HNStory, 0, len(ids))
+	for i := 0; i < len(ids); i++ {
+		if s, ok := collected[i]; ok {
+			stories = append(stories, s)
+		}
 	}
 
 	return stories, nil
 }
 
 func (h *HNClient) fetchItem(id int, v interface{}) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
 	url := fmt.Sprintf("%s/item/%d.json", hnBaseURL, id)
-	resp, err := h.client.Get(url)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return err
+	}
+
+	resp, err := h.client.Do(req)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
 
-	return json.NewDecoder(resp.Body).Decode(v)
+	return json.NewDecoder(io.LimitReader(resp.Body, hnMaxBodySize)).Decode(v)
 }
 
-// RenderStories formats HN stories as readable content for the viewport.
+// RenderHNStories formats HN stories as readable content for the viewport.
 func RenderHNStories(stories []HNStory, title string) (string, []browser.Link) {
 	r := &storyRenderer{stories: stories, title: title}
 	return r.render()
@@ -167,11 +259,11 @@ type storyRenderer struct {
 }
 
 func (r *storyRenderer) render() (string, []browser.Link) {
-	var result string
-	var links []browser.Link
+	var sb strings.Builder
+	links := make([]browser.Link, 0, len(r.stories))
 
-	result += fmt.Sprintf("  🔥 %s\n", r.title)
-	result += fmt.Sprintf("  %s\n\n", "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	sb.WriteString(fmt.Sprintf("  🔥 %s\n", r.title))
+	sb.WriteString("  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
 
 	// Sort by score descending.
 	sorted := make([]HNStory, len(r.stories))
@@ -188,9 +280,9 @@ func (r *storyRenderer) render() (string, []browser.Link) {
 		}
 
 		idx := i + 1
-		result += fmt.Sprintf("  [%d] %s\n", idx, story.Title)
-		result += fmt.Sprintf("       %d points | %s | %d comments\n", story.Score, ago, story.Descendants)
-		result += fmt.Sprintf("       %s\n\n", url)
+		sb.WriteString(fmt.Sprintf("  [%d] %s\n", idx, story.Title))
+		sb.WriteString(fmt.Sprintf("       %d points | %s | %d comments\n", story.Score, ago, story.Descendants))
+		sb.WriteString(fmt.Sprintf("       %s\n\n", url))
 
 		links = append(links, browser.Link{
 			Index: idx,
@@ -199,7 +291,7 @@ func (r *storyRenderer) render() (string, []browser.Link) {
 		})
 	}
 
-	return result, links
+	return sb.String(), links
 }
 
 func timeAgo(t time.Time) string {

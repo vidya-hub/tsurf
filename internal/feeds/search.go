@@ -17,9 +17,11 @@ type SearchResult struct {
 }
 
 // SearchDDG performs a search on DuckDuckGo HTML version and parses results.
+// Uses the shared HTTP transport for connection reuse.
 func SearchDDG(query string) ([]SearchResult, error) {
 	searchURL := "https://html.duckduckgo.com/html/?q=" + url.QueryEscape(query)
 
+	// Use a fetcher with shared transport for connection pooling.
 	fetcher := browser.NewFetcher()
 	result, err := fetcher.Fetch(searchURL)
 	if err != nil {

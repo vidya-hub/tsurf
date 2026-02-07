@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -15,6 +16,23 @@ const (
 	maxBodySize      = 10 * 1024 * 1024 // 10 MB
 	defaultUserAgent = "tsurf/0.1 (terminal browser; +https://github.com/vidyasagar/tsurf)"
 )
+
+// SharedTransport is a tuned HTTP transport shared across all clients.
+// This enables connection pooling and reuse across the application.
+var SharedTransport = &http.Transport{
+	Proxy: http.ProxyFromEnvironment,
+	DialContext: (&net.Dialer{
+		Timeout:   10 * time.Second,
+		KeepAlive: 30 * time.Second,
+	}).DialContext,
+	MaxIdleConns:          100,
+	MaxIdleConnsPerHost:   20, // Important for HN API (many requests to same host)
+	IdleConnTimeout:       90 * time.Second,
+	TLSHandshakeTimeout:   10 * time.Second,
+	ResponseHeaderTimeout: 15 * time.Second,
+	ExpectContinueTimeout: 1 * time.Second,
+	ForceAttemptHTTP2:     true,
+}
 
 // FetchResult holds the raw response from fetching a URL.
 type FetchResult struct {
@@ -32,11 +50,12 @@ type Fetcher struct {
 	userAgent string
 }
 
-// NewFetcher creates a Fetcher with sensible defaults.
+// NewFetcher creates a Fetcher with sensible defaults using the shared transport.
 func NewFetcher() *Fetcher {
 	return &Fetcher{
 		client: &http.Client{
-			Timeout: defaultTimeout,
+			Transport: SharedTransport,
+			Timeout:   defaultTimeout,
 			CheckRedirect: func(req *http.Request, via []*http.Request) error {
 				if len(via) >= 10 {
 					return fmt.Errorf("too many redirects (>10)")
@@ -46,6 +65,11 @@ func NewFetcher() *Fetcher {
 		},
 		userAgent: defaultUserAgent,
 	}
+}
+
+// Client returns the underlying HTTP client for use by other packages.
+func (f *Fetcher) Client() *http.Client {
+	return f.client
 }
 
 // Fetch retrieves the content at the given URL.

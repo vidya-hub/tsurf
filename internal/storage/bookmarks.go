@@ -114,25 +114,25 @@ func scanBookmarks(rows *sql.Rows) []Bookmark {
 
 // RenderBookmarks formats bookmarks for the viewport.
 func RenderBookmarks(bookmarks []Bookmark) (string, []browser.Link) {
-	var result string
+	var sb strings.Builder
 	var links []browser.Link
 
-	result += "  🔖 Bookmarks\n"
-	result += "  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+	sb.WriteString("  🔖 Bookmarks\n")
+	sb.WriteString("  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
 
 	if len(bookmarks) == 0 {
-		result += "  No bookmarks yet. Press 'B' to bookmark a page.\n"
-		return result, links
+		sb.WriteString("  No bookmarks yet. Press 'B' to bookmark a page.\n")
+		return sb.String(), links
 	}
 
 	for i, b := range bookmarks {
 		idx := i + 1
-		result += fmt.Sprintf("  [%d] %s\n", idx, b.Title)
-		result += fmt.Sprintf("       %s\n", b.URL)
+		sb.WriteString(fmt.Sprintf("  [%d] %s\n", idx, b.Title))
+		sb.WriteString(fmt.Sprintf("       %s\n", b.URL))
 		if len(b.Tags) > 0 {
-			result += fmt.Sprintf("       tags: %s\n", strings.Join(b.Tags, ", "))
+			sb.WriteString(fmt.Sprintf("       tags: %s\n", strings.Join(b.Tags, ", ")))
 		}
-		result += fmt.Sprintf("       saved %s\n\n", timeAgoStore(b.CreatedAt))
+		sb.WriteString(fmt.Sprintf("       saved %s\n\n", timeAgoStore(b.CreatedAt)))
 
 		links = append(links, browser.Link{
 			Index: idx,
@@ -141,5 +141,5 @@ func RenderBookmarks(bookmarks []Bookmark) (string, []browser.Link) {
 		})
 	}
 
-	return result, links
+	return sb.String(), links
 }

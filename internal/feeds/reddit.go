@@ -14,7 +14,8 @@ import (
 )
 
 const (
-	redditTimeout = 10 * time.Second
+	redditTimeout  = 10 * time.Second
+	maxRedditBytes = 2 * 1024 * 1024 // 2MB limit for Reddit responses
 )
 
 // Reddit URL patterns.
@@ -159,7 +160,10 @@ type RedditClient struct {
 // NewRedditClient creates a new Reddit API client.
 func NewRedditClient() *RedditClient {
 	return &RedditClient{
-		client: &http.Client{Timeout: redditTimeout},
+		client: &http.Client{
+			Timeout:   redditTimeout,
+			Transport: browser.SharedTransport,
+		},
 	}
 }
 
@@ -202,12 +206,12 @@ func (r *RedditClient) fetchPosts(url string) ([]RedditPost, error) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("reddit returned %d: %s", resp.StatusCode, string(body[:200]))
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return nil, fmt.Errorf("reddit returned %d: %s", resp.StatusCode, string(body))
 	}
 
 	var listing RedditListing
-	if err := json.NewDecoder(resp.Body).Decode(&listing); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxRedditBytes)).Decode(&listing); err != nil {
 		return nil, fmt.Errorf("parsing reddit response: %w", err)
 	}
 
@@ -221,11 +225,11 @@ func (r *RedditClient) fetchPosts(url string) ([]RedditPost, error) {
 
 // RenderRedditPosts formats Reddit posts for the viewport.
 func RenderRedditPosts(posts []RedditPost, title string) (string, []browser.Link) {
-	var result string
+	var sb strings.Builder
 	var links []browser.Link
 
-	result += fmt.Sprintf("  🤖 %s\n", title)
-	result += fmt.Sprintf("  %s\n\n", "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	sb.WriteString(fmt.Sprintf("  🤖 %s\n", title))
+	sb.WriteString(fmt.Sprintf("  %s\n\n", "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"))
 
 	for i, post := range posts {
 		ago := timeAgo(time.Unix(int64(post.CreatedUTC), 0))
@@ -236,9 +240,9 @@ func RenderRedditPosts(posts []RedditPost, title string) (string, []browser.Link
 		}
 
 		idx := i + 1
-		result += fmt.Sprintf("  [%d] %s\n", idx, post.Title)
-		result += fmt.Sprintf("       r/%s | %d pts | %s | %d comments\n", post.Subreddit, post.Score, ago, post.NumComments)
-		result += fmt.Sprintf("       %s\n\n", link)
+		sb.WriteString(fmt.Sprintf("  [%d] %s\n", idx, post.Title))
+		sb.WriteString(fmt.Sprintf("       r/%s | %d pts | %s | %d comments\n", post.Subreddit, post.Score, ago, post.NumComments))
+		sb.WriteString(fmt.Sprintf("       %s\n\n", link))
 
 		links = append(links, browser.Link{
 			Index: idx,
@@ -247,7 +251,7 @@ func RenderRedditPosts(posts []RedditPost, title string) (string, []browser.Link
 		})
 	}
 
-	return result, links
+	return sb.String(), links
 }
 
 // FetchPostDetail fetches a Reddit post with comments using the .json API.
@@ -267,11 +271,11 @@ func (r *RedditClient) FetchPostDetail(subreddit, postID string) (*RedditPostDet
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("reddit returned %d: %s", resp.StatusCode, string(body[:min(200, len(body))]))
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return nil, fmt.Errorf("reddit returned %d: %s", resp.StatusCode, string(body))
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxRedditBytes))
 	if err != nil {
 		return nil, fmt.Errorf("reading response: %w", err)
 	}
@@ -358,23 +362,23 @@ func parseComments(listing RedditCommentListing, depth int) []RedditComment {
 
 // RenderPostDetail formats a Reddit post with comments for the viewport.
 func RenderPostDetail(detail *RedditPostDetail) (string, []browser.Link) {
-	var result string
+	var sb strings.Builder
 	var links []browser.Link
 
 	post := detail.Post
 	ago := timeAgo(time.Unix(int64(post.CreatedUTC), 0))
 
-	result += fmt.Sprintf("  🤖 r/%s\n", post.Subreddit)
-	result += "  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+	sb.WriteString(fmt.Sprintf("  🤖 r/%s\n", post.Subreddit))
+	sb.WriteString("  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
 
 	// Post title and metadata.
-	result += fmt.Sprintf("  %s\n", post.Title)
-	result += fmt.Sprintf("  👤 u/%s | %d pts | %s | 💬 %d comments\n", post.Author, post.Score, ago, post.NumComments)
+	sb.WriteString(fmt.Sprintf("  %s\n", post.Title))
+	sb.WriteString(fmt.Sprintf("  👤 u/%s | %d pts | %s | 💬 %d comments\n", post.Author, post.Score, ago, post.NumComments))
 
 	// External link if not a self post.
 	linkIdx := 1
 	if !post.IsSelf && post.URL != "" {
-		result += fmt.Sprintf("  [%d] 🔗 %s\n", linkIdx, post.URL)
+		sb.WriteString(fmt.Sprintf("  [%d] 🔗 %s\n", linkIdx, post.URL))
 		links = append(links, browser.Link{
 			Index: linkIdx,
 			Text:  post.Title,
@@ -382,23 +386,23 @@ func RenderPostDetail(detail *RedditPostDetail) (string, []browser.Link) {
 		})
 		linkIdx++
 	}
-	result += "\n"
+	sb.WriteString("\n")
 
 	// Self text.
 	if post.Selftext != "" {
 		// Word wrap the self text.
 		wrapped := wordWrap(post.Selftext, 76)
 		for _, line := range strings.Split(wrapped, "\n") {
-			result += fmt.Sprintf("  %s\n", line)
+			sb.WriteString(fmt.Sprintf("  %s\n", line))
 		}
-		result += "\n"
+		sb.WriteString("\n")
 	}
 
 	// Comments section.
-	result += "  ── Comments ────────────────────────────\n\n"
+	sb.WriteString("  ── Comments ────────────────────────────\n\n")
 
 	if len(detail.Comments) == 0 {
-		result += "  No comments yet.\n"
+		sb.WriteString("  No comments yet.\n")
 	}
 
 	for _, comment := range detail.Comments {
@@ -410,7 +414,7 @@ func RenderPostDetail(detail *RedditPostDetail) (string, []browser.Link) {
 		cAgo := timeAgo(time.Unix(int64(comment.CreatedUTC), 0))
 
 		// Comment header.
-		result += fmt.Sprintf("  %s👤 u/%s | %d pts | %s\n", indent, comment.Author, comment.Score, cAgo)
+		sb.WriteString(fmt.Sprintf("  %s👤 u/%s | %d pts | %s\n", indent, comment.Author, comment.Score, cAgo))
 
 		// Comment body with word wrapping.
 		maxWidth := 76 - (comment.Depth * 2)
@@ -419,12 +423,12 @@ func RenderPostDetail(detail *RedditPostDetail) (string, []browser.Link) {
 		}
 		wrapped := wordWrap(comment.Body, maxWidth)
 		for _, line := range strings.Split(wrapped, "\n") {
-			result += fmt.Sprintf("  %s%s\n", indent, line)
+			sb.WriteString(fmt.Sprintf("  %s%s\n", indent, line))
 		}
-		result += "\n"
+		sb.WriteString("\n")
 	}
 
-	return result, links
+	return sb.String(), links
 }
 
 // FetchURL auto-detects a Reddit URL type and fetches/renders it.

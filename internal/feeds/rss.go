@@ -11,7 +11,10 @@ import (
 	"github.com/vidyasagar/tsurf/internal/browser"
 )
 
-const rssTimeout = 10 * time.Second
+const (
+	rssTimeout  = 10 * time.Second
+	maxRSSBytes = 2 * 1024 * 1024 // 2MB limit for RSS feeds
+)
 
 // Feed represents a parsed RSS/Atom feed.
 type Feed struct {
@@ -39,7 +42,10 @@ type RSSClient struct {
 // NewRSSClient creates a new RSS feed client.
 func NewRSSClient() *RSSClient {
 	return &RSSClient{
-		client: &http.Client{Timeout: rssTimeout},
+		client: &http.Client{
+			Timeout:   rssTimeout,
+			Transport: browser.SharedTransport,
+		},
 	}
 }
 
@@ -59,7 +65,7 @@ func (r *RSSClient) Fetch(url string) (*Feed, error) {
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxRSSBytes))
 	if err != nil {
 		return nil, fmt.Errorf("reading feed body: %w", err)
 	}
@@ -228,29 +234,29 @@ func parseAtom(data []byte) (*Feed, error) {
 
 // RenderFeed formats a feed for the viewport.
 func RenderFeed(feed *Feed) (string, []browser.Link) {
-	var result string
+	var sb strings.Builder
 	var links []browser.Link
 
-	result += fmt.Sprintf("  📡 %s\n", feed.Title)
+	sb.WriteString(fmt.Sprintf("  📡 %s\n", feed.Title))
 	if feed.Description != "" {
-		result += fmt.Sprintf("  %s\n", feed.Description)
+		sb.WriteString(fmt.Sprintf("  %s\n", feed.Description))
 	}
-	result += fmt.Sprintf("  %s\n\n", "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	sb.WriteString(fmt.Sprintf("  %s\n\n", "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"))
 
 	for i, item := range feed.Items {
 		idx := i + 1
-		result += fmt.Sprintf("  [%d] %s\n", idx, item.Title)
+		sb.WriteString(fmt.Sprintf("  [%d] %s\n", idx, item.Title))
 		if item.Author != "" {
-			result += fmt.Sprintf("       by %s", item.Author)
+			sb.WriteString(fmt.Sprintf("       by %s", item.Author))
 		}
 		if !item.Published.IsZero() {
-			result += fmt.Sprintf(" | %s", timeAgo(item.Published))
+			sb.WriteString(fmt.Sprintf(" | %s", timeAgo(item.Published)))
 		}
 		if item.Author != "" || !item.Published.IsZero() {
-			result += "\n"
+			sb.WriteString("\n")
 		}
 		if item.Link != "" {
-			result += fmt.Sprintf("       %s\n", item.Link)
+			sb.WriteString(fmt.Sprintf("       %s\n", item.Link))
 			links = append(links, browser.Link{
 				Index: idx,
 				Text:  item.Title,
@@ -262,12 +268,12 @@ func RenderFeed(feed *Feed) (string, []browser.Link) {
 			if len(desc) > 200 {
 				desc = desc[:197] + "..."
 			}
-			result += fmt.Sprintf("       %s\n", desc)
+			sb.WriteString(fmt.Sprintf("       %s\n", desc))
 		}
-		result += "\n"
+		sb.WriteString("\n")
 	}
 
-	return result, links
+	return sb.String(), links
 }
 
 // stripHTML does a basic removal of HTML tags.

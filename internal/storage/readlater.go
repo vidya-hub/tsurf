@@ -109,15 +109,15 @@ func scanReadLaterItems(rows *sql.Rows) []ReadLaterItem {
 
 // RenderReadLater formats read-later items for the viewport.
 func RenderReadLater(items []ReadLaterItem) (string, []browser.Link) {
-	var result string
+	var sb strings.Builder
 	var links []browser.Link
 
-	result += "  📚 Read Later\n"
-	result += "  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+	sb.WriteString("  📚 Read Later\n")
+	sb.WriteString("  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
 
 	if len(items) == 0 {
-		result += "  No items in read later queue. Press 'R' to add a page.\n"
-		return result, links
+		sb.WriteString("  No items in read later queue. Press 'R' to add a page.\n")
+		return sb.String(), links
 	}
 
 	for i, item := range items {
@@ -126,9 +126,9 @@ func RenderReadLater(items []ReadLaterItem) (string, []browser.Link) {
 		if item.Read {
 			status = "  "
 		}
-		result += fmt.Sprintf("  [%d]%s %s\n", idx, status, item.Title)
-		result += fmt.Sprintf("       %s\n", item.URL)
-		result += fmt.Sprintf("       added %s\n\n", timeAgoStore(item.CreatedAt))
+		sb.WriteString(fmt.Sprintf("  [%d]%s %s\n", idx, status, item.Title))
+		sb.WriteString(fmt.Sprintf("       %s\n", item.URL))
+		sb.WriteString(fmt.Sprintf("       added %s\n\n", timeAgoStore(item.CreatedAt)))
 
 		links = append(links, browser.Link{
 			Index: idx,
@@ -137,7 +137,7 @@ func RenderReadLater(items []ReadLaterItem) (string, []browser.Link) {
 		})
 	}
 
-	return result, links
+	return sb.String(), links
 }
 
 // Shared helpers for the storage package.
